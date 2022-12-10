@@ -1,4 +1,4 @@
-**Table S1. Maize TF mutant alleles isolated from the UniformMu population to test GRN predictions. **Mutant allele transcriptome data obtained, and transcriptome assembly predicted transcript structure included.
+**Table S1. Maize TF mutant alleles isolated from the UniformMu population to test GRN predictions.** Mutant allele transcriptome data obtained, and transcriptome assembly predicted transcript structure included.
 
 **Data File S1**Fasta file of TRINITY *de novo* assembled transcripts for all mutant alleles and control. 
 
