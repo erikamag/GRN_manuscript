@@ -1,4 +1,4 @@
-TF	Genotype	Tissue	direction	goid	goname	n	p-value	B73v4.gid	W22.gid
+TF	Genotype	Tissue	direction	GO_ID	GO_name	n	p-value	B73v4.gid	W22.gid
 BAF60.21	baf60.21-m1	tassel_stem	down	GO:0000170	sphingosine hydroxylase activity	2	0.047489067	"Zm00001d043994,Zm00001d044833"	"Zm00004b019447,Zm00004b031538"
 BAF60.21	baf60.21-m1	tassel_stem	down	GO:0001128	RNA polymerase II transcription coactivator activity involved in preinitiation complex assembly	1	0.046561975	Zm00001d044902	Zm00004b031582
 BAF60.21	baf60.21-m1	tassel_stem	down	GO:0003918	DNA topoisomerase type II (ATP-hydrolyzing) activity	4	0.042738649	"Zm00001d002069,Zm00001d002071,Zm00001d026457,Zm00001d050568"	"Zm00004b006115,Zm00004b006116,Zm00004b040412,Zm00004b021681"
