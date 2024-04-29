@@ -1,6 +1,6 @@
 # GRN Manuscript Supplemental Tables and Data Files
 
-**Table S1. Maize TF mutant alleles isolated from the UniformMu population to test GRN predictions.** Mutant allele transcriptome data obtained, differential expression data averaged across biological replicates (N-rep) in mutant allele (CPM) and W22 control (W22_CPM) samples (log2fc: log2 fold change of mutant to control, lfcSE: log fold change standard error and FDR adjusted p-value included). 
+**Table S1. 32 Maize TF mutant alleles isolated from the UniformMu population to test GRN predictions.** Mutant allele transcriptome data obtained, UniformMu Mu ID and Stock, Pos: Mu insertion position within the gene, and Pedi: pedigree of the mutant stock sampled for RNA-seq (BC = backcross, S = self). RNA-seq CPM and FPKM for TF mutant and wild-type W22, DE data averaged across biological replicates (N), log2fc: log2 fold change of mutant to control, lfcSE: log fold change standard error and FDR adjusted p-value. Data for TF genes that are that are DE in the mutant compared to the wild-type are highlighted. 
 
 **Data File S1. Differentially expressed genes for each TF mutant allele.** Up- and down-regulated DE genes (log2fc ≥ 1 and FDR adjusted p-value < 0.05) for each mutant allele and those shared by multiple independent alleles per TF in this study.
 
@@ -11,3 +11,5 @@
 **Data File S4. Significant hypergeometric enrichment of GO terms associated with TF mutant allele differentially expressed genes.** The number (n) of TF mutant allele down-regulated or up-regulated DEGs associated with a GO term (GO_ID and GO_name),the hypergeometric enrichment p-value, and the corresponding DEG B73v4 and W22 gene IDs are recorded. 
 
 **Data File S5. Predicted targets from GCN and Y1H methods for all transcription factors in this study.** TF-target predictions are listed by prediction method: y1h; Y1H screen, n1; 1/45 GCNs, and/or n3' 3/45 GCNs. For TFs with Y1H predictions, total targets (n) represents all B73v4 target genes. For TFs with GCN predictions, total targets (n) represent a subset of the predicted B73v4 targets that have an annotated W22 gene model and are expressed (CPM ≥ 1 in at least one sample/tissue). 
+
+**Note:** RNA-seq data collected can be found at **SRA BioProject: SUB12766103** and RNA-seq meta data is included as **Table_SX_TF-mutant_RNAseq_meta-data**.
