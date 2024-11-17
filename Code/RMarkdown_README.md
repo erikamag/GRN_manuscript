@@ -21,4 +21,4 @@ No code, just further description and input file included.
 
 **Phenolic profiling with targeted LC-MS- Meatbolite data analysis**
 
-/Code/R_Input directory contains some of the input files used in the R Markdown Code
+/Code/R_Input directory contains some of the input files used in the RMarkdown Code
