@@ -1,0 +1,1249 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-11-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Identification of DE genes for RNA-seq datasets/Tissue ###
+Read in result file from Nextflow RNA-seq output "01.rds" file from Nextflow RNA-seq output https://nf-co.re/rnaseq
+MIT License. Copyright (c) 2019 Peng Zhou
+See nextflow_rnaseq_Zhou_output.md for details on Nextflow output files
+
+# Read mapping methods
+For all samples, sequencing reads were then processed through the nf-core RNA-Seq pipeline (Di Tommaso et al. 2017; Ewels et al. 2020) built with Nextflow v20.10.0 (Di Tommaso et al. 2017) for initial QC and raw read counting. Reads were trimmed using Trim Galore! v0.6.5 (Krueger) and aligned to the W22 reference genome (Springer et al. 2018) using Hisat2 v2.1.0 (Kim et al. 2015) with default parameters (hisat2 -x $db $input -p 12 --met-stderr --new-summary). Uniquely aligned reads were counted per feature by featureCounts v2.0.1 (Liao et al. 2014). Raw read counts were normalized by library size and corrected for library composition bias using the TMM normalization approach in edgeR v3.28.0 (Oshlack et al. 2010), to give CPMs (Counts Per Million reads) for each gene in each sample allowing direct comparison between mutant and control samples (Table S1). CPM values were normalized by gene CDS lengths to give FPKM (Fragments Per Kilobase of exon per Million reads) values (Table S1). Genes were considered expressed if their CPM was ≥ 1 in at least one sample per tissue.
+
+# 1. Raw read count normlization: edgeR TMM method for calculating CPM and FPKM values.
+Coleoptile_tip used as an example
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+library(tidyr)
+library(edgeR)
+
+x = readRDS(file.path(dird, "01.rds")) 
+tm = data.frame(x[["tm"]]) # data frame with SampleID, Gene ID's (W22) and ReadCounts
+th = data.frame(x[["th"]]) # data frame with meta data
+
+rm = data.frame(xx[["tm"]])
+r1 = rm %>% select(gid, SampleID, ReadCount)
+r2 = r1 %>% pivot_wider(values_from = ReadCount, names_from = SampleID) 
+r3 = r2 %>% remove_rownames() %>% column_to_rownames((var="gid"))
+
+dge <- DGEList(counts = r3)
+#/ calculate TMM normalization factors
+dge <- calcNormFactors(dge, method = "TMM")
+# Get normalized read counts
+cpm_values <- cpm(dge, normalized.lib.sizes = TRUE)
+
+r4 = data.frame(cpm_values) %>% rownames_to_column(var = "gid")
+r5 = r4 %>% 
+  pivot_longer(cols = c(2:33), names_to = "SampleID", values_to = "CPM") 
+
+# Calculate FPKM
+wg = read_tsv(file.path(dird, "W22_gene-size.tsv")) # size.exon column is the UTR+CDS - length of mature mRNA, size.rna is the pre-processed mRNA with introns= length of gene, T001
+we = wg %>% select(1,2,9)
+bc = left_join(r5,we)
+bd = bc %>% mutate(FPKM = CPM/(size.exon/1000)) 
+
+# join df to Read Counts and meta data information
+# join data frame 
+aa = left_join(tm, th) %>% left_join(bd) # have df with: gid, SampleID, ReadCount, CPM, FPKM, Tissue, Genotype, Treatment, Replicate, paired
+
+```
+#### Identification of DE genes for RNA-seq datasets/Tissue ###
+# 2. Get an expressed gene list for all samples/tissue
+Coleoptile_tip used as an example
+
+```{r}
+library(plyr)
+
+#filter thm_m by tissue- e.g. coleoptile_tip
+tct = aa %>% filter(Tissue == "coleoptile_tip")
+
+tct_e = 
+  tct %>% 
+  mutate(res = ifelse(CPM >=1, 1, 0)) %>% # adds a column called res that prints out a 1 if CPM >=1 and a 0 if CPM is < 1
+  dplyr::group_by(gid) %>% # group_by gid means to count the the same gid over different Genotypes as a unit
+  dplyr::summarise(n = n(), n.res = sum(res)) #n prints out how many times each unique gid occurs, n.res sums all res column to count how many times one gid had a CPM >= 1. 
+
+tct_ex = tct_e %>% filter (n.res >= 1) # tm filter for expressed genes
+
+# now I want to write this table to results file, but first want to merge tm_m with tm_expressed only keeping rows in tm_m (gid's) that match tm_expressed for all contrasts/ tissue
+
+tct_x = match_df(tct, tct_ex, on = "gid")
+tct_xu = unique(tct_x$gid) #20979/40651 genes in W22
+
+# repeated this for all 5 tissues in total: coleoptile tip, imbibed embryo, seedling leaf, tassel stem and tassel. List of expressed genes where at least one sample (1 biological replicate) had a CPM value > 1
+tei_x # embryo_imbibed
+tlf_x # leaf
+tts_x # tassel_stem
+tta_x # tasssel
+
+# final expressed gene list
+tbx = rbind(tct_x, tei_x, tlf_x, tts_x, tta_x) 
+
+```
+#### Identification of DE genes for RNA-seq datasets/Tissue ###
+
+To determine if any genes could be DE due to genetic differences between the control W22 r-g colorless and UniformMu color-converted W22 (McCarty et al. 2005), DE genes were called between all TF mutant allele and W22 samples from the same tissue. A small number of genes (n = 1773) that are consistently DE in more than half of the mutant alleles from imbibed embryo, tassel stem and seedling leaf tissues (tissues with < 50% of mutant reads from one TF gene) were removed. 
+
+Removed genes that were called DEG between all mutant alleles and W22 in three tissues: imbibed embryo, tassel stem and seedling leaf tissues. Do not want to compare differences between genes that may be due to differences in background genotype and not from knockout out the TF.
+
+# 3. Run DEseq2 on all mutant alleles x W22 control/ tissue, not each mutant allele x W22 separately.
+ Using coleoptile tip as an example
+
+1. Pre-filter low expressed genes
+While it is not necessary to pre-filter low count genes before running the DESeq2 functions, there are two reasons which make pre-filtering useful: by removing rows in which there are very few reads, we reduce the memory size of the dds data object, and we increase the speed of the transformation and testing functions within DESeq2. Here we perform a minimal pre-filtering to keep only rows that have at least 10 reads total. # Pre-filtering http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+2. Run DEseq, take res(dds) contrasts want
+3. Filter DEG list: abs(log2fc) >=2, padj < 0.05
+
+```{r}
+# filter both tm and th (Read Count data and meta data, data frames) x tissue for DEseq matrices
+tm_ct = tm %>% filter(str_detect(SampleID, "C")) # can use str_detect to filter for column that contains partial string
+th_ct = th %>% filter(Tissue == "coleoptile_tip")
+
+#filter tm df for Read Count, gid, and SampleID x tissue
+tct_rc = tm_ct %>% select(1:3)
+
+#replace all '-' in Genotype col values with '_'. Counts prefers variables to be letters, numbers,'_' and '.'
+th_ct$Genotype = gsub('-', '_', th_ct$Genotype)
+
+# added a column called Treatment_2 that has "mutant" for all mutant alleles/tissue and "control" for W22
+
+#DE matrix for coleoptile_tip tissue where it is designed with all mutant alleles x W22 control samples
+tct_c = pivot_wider(tct_rc, names_from = SampleID, values_from = ReadCount) 
+tct_c = column_to_rownames(tct_c, var = "gid")
+dds_ct = DESeqDataSetFromMatrix(countData=tct_c, 
+                              colData=th_ct, 
+                              design=~Treatment_2, tidy = FALSE)
+# pre-filter genes with low read counts
+keep = rowSums(counts(dds_ct)) >= 10
+dds_ct = dds_ct[keep,]
+
+# now run DEseq 
+dds_ct = DESeq(dds_ct)  
+
+#create a results df
+rct_mw = as.data.frame(results(dds_ct, contrast = c("Treatment_2", "mutant", "Control"), pAdjustMethod = "fdr")) %>% rownames_to_column("gid") %>% add_column(Tissue = "coleoptile_tip", contrast = "mutant_W22")
+rctx_mw = plyr::match_df(rct_mw, tct_x, on = "gid") #now filter DEG results for expressed genes with average cpm >=1 in at least one sample
+
+# completed for all tissues and created final df
+rmw = rbind(reix_mw, rlfx_mw, rctx_mw, rtsx_mw, rtax_mw) 
+
+# Look at all genes that have a 1:1 gene ID between B73.v4 and W22 genomes because downstream analyses will only consider these genes
+qp = read_tsv(file.path(dirgid, "gid_B73v4-W22_one-to-one.tsv"), col_names = TRUE) # 1:1 B73.v4 and W22 gene ID file
+
+tv = left_join(rmw, qp, by = "w.gid") 
+tx = tv %>% filter(!is.na(b.gid)) #filter out all rows with NA values in b.gid column 
+
+tx$direction = ifelse(tx$log2fc >= 0, "up", "down") 
+tx = tx %>% mutate(g_de = case_when(abs(log2fc) >= 1 & padj < 0.05 ~ "de")) # the '~' in case_when() is what you want to name a value if it meets the case conditions. 
+tx = tx %>% mutate(g_de = case_when(is.na(g_de) ~ "n_de", TRUE ~ as.character(g_de))) # no for all NA's in de column print n_de
+
+# filter out only DEGs
+ty = tx %>% filter(g_de == "de")
+# create a summary count for each contrast 
+tz = ty %>% group_by(contrast, Tissue, direction) %>% dplyr::summarise(n= n(), gid = str_c(b.gid, collapse = ","), w.gid = str_c(w.gid, collapse = ","), log2fc = str_c(log2fc, collapse = ","), padj= str_c(padj, collapse = ","))
+
+write_tsv(tz, file.path(dirr, "rn21a_mutant_x_W22_degs.tsv")) # final all mutant alles x W22 control DEGs/tissue
+
+tz = read_tsv(file.path(dirr, "rn21a_mutant_x_W22_degs.tsv"), col_names = TRUE)
+va = tz %>% separate_rows(gid, w.gid, log2fc, padj, sep = ",")
+
+vb = va %>% select(1,2,5)
+
+# do not need to summarize counts because each DEG can only be DE once/tissue
+
+# now summarise how many times each gene is DE when taking all mutant allelse x W22 control/ tissue. don't need to worry about direction having duplicates/allele because 1 gene cannot be up and down/1 allele
+# idenitfy how many alleles there are/Tissue
+thh = th %>%
+  group_by(gid, Tissue) %>%
+  dplyr::summarise(n_gw = n()) #n_gw = n_genotype x W22
+
+# now full_join
+vc = full_join(thh, vb)
+
+# how many times each gene is DE from the all mutant alleles x W22 control/Tissue DE calls.
+vd = vc %>%
+  group_by(Tissue, n_gw, contrast) %>%
+  dplyr::summarise(f_n = n()) 
+
+ve = vd %>% mutate(contrast = case_when(is.na(contrast) ~ "genotype_W22", TRUE ~ as.character(contrast))) 
+vf = ve %>% mutate(n_gw = case_when(is.na(n_gw) ~ "0", TRUE ~ as.character(n_gw))) 
+ve$n_gw[is.na(ve$n_gw)] = as.integer("0")
+
+# now create stacked bar plots and facet wrap page ~ Tissue
+
+#making a barplot of frequency, # genes that were deg x # mutants 
+library(ggplot2)
+library(dplyr)       # consistent data.frame operations
+library(purrr)       # consistent & safe list/vector munging
+library(tidyr)       # consistent data.frame cleaning
+library(lubridate)   # date manipulation
+library(scales)      # pairs nicely with ggplot2 for plot label formatting
+library(ggthemes)    # has a clean theme for ggplot2
+library(ggsci)
+library(viridis)     # best. color. palette. evar. # 
+library(knitr)      # kable : prettier data.frame output
+library(ggforce)
+library(tidytext)
+
+gg = ggplot(ve, aes(x = n_gw, y = f_n, fill = contrast, width=.85)) + # width creates space between bars in geom_bar
+  geom_bar(position = "stack", stat = "identity", color = "black") +  
+  scale_fill_viridis(discrete = T) + 
+  scale_x_continuous(name = "mutant_n:genotype_W22", breaks = seq(0, max(ve$n_gw), by = 1), expand = c(0,0)) + 
+  scale_y_continuous(name = "deg frequency", breaks = seq(0, max(ve$f_n), by = 100), expand = c(0,0)) + 
+  theme_classic() + 
+  theme(
+    axis.text=element_text(size=9, color = "black"),
+    strip.text = element_text(size = 10, color = "black"), 
+    strip.background = element_blank()) +
+  facet_wrap_paginate(~Tissue, scales = "free", ncol = 1, nrow = 1, page = 1)
+
+n = n_pages(gg)
+
+pdf(file.path(dirr, "rn21a_contrast_nrdeg_freq.pdf"), width = 10, height= 11) # save an empty plot (.pdf) and print ggplot to it 
+for(i in 1:n){
+    print(gg + facet_wrap_paginate(~Tissue, scales = "free", ncol = 1, nrow = 1, page = i))
+}
+dev.off()
+
+```
+#### Identification of DE genes for RNA-seq datasets/Tissue ###
+# Run DEseq2 on all mutant alleles x W22 control/ tissue, not each mutant allele x W22 separately.
+See rn21a_contrast_nrdeg_freq_barplot.pdf
+
+We do see the trend of greater overlap of the mutant_W22 DEGs with an increasing number of genes that are DE in more mutant alleles from the genotype_W22.
+
+Thoughts on filtering based on these plots: 
+A.  Either we filter out all of the DEGs called in the all mutants_W22 contrast/tissue
+B.  We select which DEG calls of all mutant alleles x W22 in each tissue to trust based on the number of mutant alleles we analyzed/Tissue  e.g. in coleoptile_tip there are 4 alleles and 2 are from 1 TF versus Tassel, there are 3 alleles and 2 are from the same TF. 
+
+Lets go with option B. 
+
+For all tissues where n alleles < 50% of counts from 2 alleles/ TF remove DEGS from all mutants_W22 that overlap with previous Genotype_W22 DEG calls.
+# embryo_imbibed, leaf, and tassel_stem
+Leave tissues where mutants_W22 contrast is a small n and >=50% of the counts are coming from 2 alleles/1TF. May end up throwing removing specific alleles of this tissue altogether. 
+
+Found that mutant_W22 DEGs/tissue increased overlap with # of genotype_W22 DEGs that were DEG in > # of mutants. This may be indicative of control W22 (reference) and mutant (UniformMu) W22 being different. 
+Although we had a greater n of alleles for for ei and leaf tissues that were self only pedigree mutants - we do see more mutant_W22 DEGs overlap with genotype_W22 DEGs in more mutants (mutant_n) for these self pedigrees than tassel_stem (BC1S2 alleles)
+
+```{r} 
+tz = read_tsv(file.path(dirr, "rn21a_mutant_x_W22_degs.tsv"), col_names = TRUE)
+va = tz %>% separate_rows(gid, w.gid, log2fc, padj, sep = ",")
+vb = va %>% select(1:2,5:6)
+vc = vb %>% filter(Tissue %in% c("embryo_imbibed", "leaf", "tassel_stem")) # only want to select tissues want to remove DEGs from 
+
+# Final expressed gene list after filtering out all mutant x W22 DEGS (mw) in ei, lf, and ts tissues. 
+dn = plyr::match_df(x5, vc, on = c("w.gid", "Tissue")) # remove only genes by gid and tissue because the filter degs between mw and expressed or not expressed were by tissue
+# note: this removes genes from W22 control samples that were called DEG between all mutants and W22. this is what I want. do not want to compare differences between genes that may be due to differences in background and not from knockout out the tf.
+
+# remove alleles we do not trust are knockouts
+ea = dn %>% filter(!Genotype %in% c("bsd10_m1", "bsd10_m2", "bzip76_m1", "gbp20_m1", "gras75_m2", "jmj13_m7", "myb36_m1", "mybr40_m1", "mybr40_m2", "orphan249_m2"))
+
+write_tsv(ea, file.path(dirr, "rn21a_exp_filter_mw.tsv")) # final gene expressed after filtering out all mutant x W22 DEGS (mw) in ei, lf, and ts tissues. 
+
+```
+#### Identification of DE genes for RNA-seq datasets/Tissue ###
+
+# 4. PCA plots
+# PCAtools package, which will give you much better clusterings - clusterings comparable to t-SNE but stably reproducible
+
+# Expressed genes/Tissue that were not DEG between all mutant alleles and W22 control in the 3 tissues: imbibed embryo, tassel stem and seedling leaf tissues were used for PCA analysis
+
+e.g., Coleoptile tip tissue
+
+```{r}
+library(ggplot2)
+library(PCAtools)
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+library(tidyr)
+library(edgeR)
+
+#PCAtools plot function
+# make separate matrices for each tissue
+ctw = ea %>% filter(Tissue == "coleoptile_tip") %>% select(1:3) %>% pivot_wider(names_from = "SampleID", values_from = "logCPM") %>% remove_rownames %>% column_to_rownames(var="w.gid")
+
+# Create a metadata file for each tissue where all the colnames of the matrix match the rownames of metadata
+#coleoptile_tip
+ctm = ea %>% filter(Tissue == "coleoptile_tip") %>% select(2,4:6) %>% distinct() %>% column_to_rownames(var="SampleID")
+
+# check that sample names match exactly between pdata and expression data 
+all(colnames(ctw) == rownames(ctm))
+
+# Conduct principal component analysis (PCA):
+p = pca(ctw, metadata = ctm) 
+biplot(p, colby = "Genotype", gridlines.major = FALSE, gridlines.minor = FALSE)
+
+ct_var = p$variance  # lists the PC variance
+
+# create dataframe to plot pca 
+ctp = p$rotated %>% as.data.frame %>%
+  rownames_to_column("SampleID")
+ctq = ctm %>% rownames_to_column("SampleID") %>% left_join(ctp)
+
+library(ggplot2)
+library(ggsci)
+library(ggrepel)
+library(ggforce)
+
+p1 = ggplot(ctq, aes(x=PC1,y=PC2, color=Genotype, shape = Genotype)) + 
+   geom_point(size = 3) +
+  ggforce::geom_mark_ellipse(aes(), color = "wheat2", size = 0.5) +
+     scale_shape_manual(values=0:4) + # can repeat the number of times needed
+      theme_classic() + 
+      scale_color_aaas() +
+     theme(legend.position=c(0.02,0.02), legend.justification = c(0.02,0.02), legend.title = element_blank(), legend.text = element_text(size = 10)) +
+      labs(x=paste0("PC1 (",round(ct_var[1],1),"%)"),
+       y=paste0("PC2 (",round(ct_var[2],1),"%)")) +
+      theme(axis.ticks = element_blank(), # removing axis.ticks and axis text
+            axis.text = element_blank()) + 
+      theme(panel.border = element_rect(colour = "black", fill=NA, size = 1)) # adding a border around plot
+ggsave(file.path(dirr, 'PCAtools_ct_ellipses.pdf'), p1, width=8, height=8)
+
+```
+#### Identification of DE genes for RNA-seq datasets/Tissue ###
+
+# 5. DEseq on all genes/tissue for each mutant allele (3 biological replicates) x W22 (3 biological replicates)
+
+1. prefilter genes for low read counts
+While it is not necessary to pre-filter low count genes before running the DESeq2 functions, there are two reasons which make pre-filtering useful: by removing rows in which there are very few reads, we reduce the memory size of the dds data object, and we increase the speed of the transformation and testing functions within DESeq2. Here we perform a minimal pre-filtering to keep only rows that have at least 10 reads total. http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+2. Run DEseq, take res(dds) contrasts want
+3. Filter DEG list: abs(log2fc) >=2, padj < 0.05
+4. Calculate average cpm value across three replicates if not already done
+5. Filter out lowly expressed genes after get final DEG list filtered. Expressed genes: avg. cpm >= 1 cpm in at least one samples/tissue
+6. filter out DEGs from previous from previous DE analysis (all mutant alleles x W22/tissue in 3 tissues: imbibed embryo, tassel stem and seedling leaf)
+
+Not necessary to filter requiring average CPM >=1 before running DEseq; however, it is a good idea to pre-filter based on raw reads.
+Although DEseq2 does some low-variance filtering internally, the number of genes you feed into the algorithm do have an effect on the parameter estimation and final output (pvalues). DEseq2 encourages users to pre-filter their input read count matrix. It is recommended to remove genes where total read counts (summed raw read counts over all samples) is less than 10.
+
+# DEseq matrix
+Make a different DEseq matrix x each tissue. 
+Design specifies how the counts from each gene depend on our variables in the metadata
+For this dataset the factor we care about is our Genotype (design = ~Genotype)
+tidy=TRUE argument, which tells DESeq2 to output the results table with rownames as a first #column called 'row. tidy= TRUE because moved first column to row names already to get rid of Error: ncol(countData) == nrow(colData) is not TRUE
+
+```{r}
+library(DEseq2)
+library(gplots)
+
+# filter tm df for Read Count, gid, and SampleID x tissue
+tct_rc = tm_ct %>% select(1:3)
+
+# replace all '-' in Genotype col values with '_'. Counts prefers variables to be letters, numbers,'_' and '.'
+th_ct$Genotype = gsub('-', '_', th_ct$Genotype)
+
+# tct
+#make matrix using df, tm and th with DEseqDataSetFromMatrix().
+tct_c = pivot_wider(tct_rc, names_from = SampleID, values_from = ReadCount) 
+tct_c = column_to_rownames(tct_c, var = "gid")
+dds_ct = DESeqDataSetFromMatrix(countData=tct_c, 
+                              colData=th_ct, 
+                              design=~Genotype, tidy = FALSE)
+# pre-filter for removing sum(raw reads < 10) for each gene. 
+keep = rowSums(counts(dds_ct)) >= 10
+dds_ct = dds_ct[keep,]
+
+# run DESeq
+dds_ct = DESeq(dds_ct)
+# now contrast results of dds to pull out a specific contrast (TF mutant vs W22) or by any Control and Treatment
+rct.wrky2_m2 = as.data.frame(results(dds_ct, contrast = c("Genotype", "wrky2_m2", "W22"), pAdjustMethod = "fdr")) %>% rownames_to_column("gid") %>% add_column(contrast = "wrky2_m2") 
+rct.myb40_m1 = as.data.frame(results(dds_ct, contrast = c("Genotype", "myb40_m1", "W22"), pAdjustMethod = "fdr")) %>% rownames_to_column("gid") %>% add_column(contrast = "myb40_m1") 
+rct.myb40_m2 = as.data.frame(results(dds_ct, contrast = c("Genotype", "myb40_m2", "W22"), pAdjustMethod = "fdr")) %>% rownames_to_column("gid") %>% add_column(contrast = "myb40_m2") 
+rct.e2f13_m1 = as.data.frame(results(dds_ct, contrast = c("Genotype", "e2f13_m1", "W22"), pAdjustMethod = "fdr")) %>% rownames_to_column("gid") %>% add_column(contrast = "e2f13_m1") 
+
+rct = rbind(rct.wrky2_m2, rct.myb40_m1, rct.myb40_m2, rct.e2f13_m1) 
+rct = rct %>% add_column(Tissue = "coleoptile_tip")
+
+#now filter res.deg for expressed genes with average cpm >=1 in at least one sample
+# because using match_df do not need to select or filter tct_x for gid column alone
+rct_dx = plyr::match_df(rct, tct_x, on = "gid") 
+
+# completed for all other tissues and Genotypes separately
+# bind data frames for each tissue
+rn.dx = rbind(rct_dx, rei_dx, rlf_dx, rta_dx, rts_dx) # coleoptile_tip, embryo_imibed, seedling_leaf, tassel and tassel_stem
+rn.dx = rn.dx %>% dplyr::rename("log2fc" = "log2FoldChange")
+
+dn = plyr::match_df(rn.dx, ea, on = c("w.gid", "Tissue")) # DEG data for expressed genes after filtering out all mutant x W22 DEGS (mw) in ei, lf, and ts tissues. 
+
+# Identify which genes have a B73v4 gene ID
+qp = read_tsv(file.path(dirgid, "gid_B73v4-W22_one-to-one.tsv"), col_names = TRUE) # 1:1 B73.v4 and W22 gene ID file
+
+tv = left_join(dn, qp, by = "w.gid") 
+tx = tv %>% filter(!is.na(b.gid)) #filter out all rows with NA values in b.gid column 
+
+# numbers check before filtering for DE log2fc and padj cutoffs
+rn.dxn = tx %>% 
+    dplyr::count(contrast) #this will just be how many genes were expressed in each tissue. same numbers as t*_x dfs - the expressed gid list / tissue
+
+rn.de = filter(rn21a.dx, abs(log2fc) >= 1, padj < 0.05) #filter for DE genes only
+rn.den = rn.de %>% 
+    dplyr::count(contrast) # how many DEGs for each allele
+
+rn.dxn$direction = ifelse(rn.dxn$log2fc >= 0, "up", "down") 
+rn.dxn = rn.dxn %>% mutate(g_de = case_when(abs(log2fc) >= 1 & padj < 0.05 ~ "de")) # the '~' in case_when() is what you want to name a value if it meets the case conditions. 
+rn.dxn = rn.dxn %>% mutate(g_de = case_when(is.na(g_de) ~ "n_de", TRUE ~ as.character(g_de))) # no for all NA's in de column print n_de
+
+write_tsv(rn.dxn, file.path(dirr, "rn21a_deg_B73_filter_mw.tsv")) #final DEG data frame
+
+```
+### Enrichment for shared DEGs between multiple independent mutant alleles (Figure S2) ###
+
+making a gene-set enrichment plot for overlap between multiple alleles/1TF
+http://nemates.org/MA/progs/overlap_stats.html
+
+Representation factor
+The representation factor is the number of overlapping genes divided by the expected number of overlapping genes drawn from two independent groups.
+A representation factor > 1 indicates more overlap than expected of two independent groups, a representation factor < 1 indicates less overlap than expected, and a representation factor of 1 indicates that the two groups by the number of genes expected for independent groups of genes.
+
+x = # of DEGs by direction (up or down) in common between two independent mutant alleles/TF.
+n = # of DEGs/direction in group 1.
+D = # of DEGs/direction in group 2.
+N = total expressed genes with the filtered mw (mutant x W22 DEG) genes removed 
+
+The representation factor = x / expected # of genes. 
+Expected # of genes = (n * D) / N
+
+```{r}
+ma = read_tsv(file.path(dirr, "rn21a-rn20h_deg_B73_multi-alleles_gsea.txt"))
+
+# used code below to create rn21a-rn20h_deg_B73_multi-alleles_gsea.txt where n_m1 = number of DEGs from mutant allele 1, D_m2 = number of DEGs from mutant allele 2, x = overlap, N = total expressed genes, 
+ov = rn.dxn %>% 
+  group_by(tf, gid, direction) %>% #this will keep only TFs with two mutant alleles and their shared DEGs 
+   filter(n() >= 2)
+
+rno = ov %>% group_by(tf, gid, direction, Tissue) %>% dplyr::summarise(Genotype= str_c(Genotype, collapse = "|"))
+
+#Determine the proportion of overlap between alleles from the allele with the least amount of DEGs / direction For example, baf60.21-m1 cannot have more than 35 DEGs overlap because that is the minimum #DEG
+ma1 = ma %>% mutate(prop_ov_min = if_else(n_m1 > D_m2, x/D_m2, 0)) %>% mutate(prop_ov_min = if_else(n_m1 < D_m2, x/n_m1, as.double(prop_ov_min))) #first replace with needed to be class double 
+break_values = pretty(ma1$prop_ov_min)
+
+ma2 = ma1 %>% mutate(min_de = if_else(n_m1 > D_m2, D_m2, 0)) %>% mutate(min_de = if_else(n_m1 < D_m2, n_m1, as.double(min_de))) 
+
+ma2 = ma2 %>% mutate(min_de_stack = min_de - x)
+ma3 = ma2 %>% pivot_longer(cols = c(x,min_de_stack))
+ma4 = ma3 %>% mutate(value = if_else(direction == "down", -value, as.double(value)))
+#break_values = pretty(ma4$value)
+break_values = c(-600,-500,-400,-300,-200,-100,0,100,200,300,400)
+
+gh=
+  ma4 %>%
+  ggplot(aes(x = Genotype, y = value, fill = name)) +
+  geom_hline(yintercept = 0)+
+  geom_bar(stat = "identity", position = "stack", colour="black", size=0.4)+
+  scale_x_discrete(limits=rev)+ #reverses order of Genotype
+  scale_y_continuous(breaks = break_values,
+                     labels = abs(break_values), limits = c(-600, 400))+
+  labs(y="Number of DEGs") + 
+  theme_classic(base_family = "Helvetica") + 
+  theme(
+    axis.text=element_text(size=10, color = "black"),
+    panel.background = element_rect(colour = "black", size=1, fill=NA)) + 
+  coord_flip() 
+ggsave(file.path(dirr2, "03_3b.pdf"), gh, width = 11, height = 4.5)
+
+```
+### Enrichment for TF predicted targets ###
+
+All statistical analyses for enrichment of DEGs utilized a hypergeometric probability. Testing for over-representation or enrichment of mutant allele DEGs for GO terms (File S4) or GCN predicted targets was calculated with R stats v4.0.2 hypergeometric phyper(q = x - 1, m, n = N - m, k, lower.tail = FALSE) function, p < 0.05 for significance (R Core Team 2020). For GO term enrichment: N = number of expressed genes associated with any GO term, m = number of genes with a specific GO term, k = number of DEGs with any GO term, x = number of DEGs with a specific GO term. For GCN (n1 and n3) predicted target enrichment: N = number of expressed non-redundant predicted target genes in the genome, m = number of expressed predicted targets per TF, k = number of DEGs, x = number of DEGs that are predicted targets. The fold-enrichment of GCN predicted targets that were DE was calculated by [x / (k / N) × m]. 
+
+# 1. GO term enrichment
+
+```{r}
+# GO terms for genes expressed with 1:1 B73.v4 and W22 gids
+go = read_tsv(file.path(dird1, "01.go.tsv"), col_names = TRUE) # go terms modified for B73 v4 genome from Peng
+
+go$goname = gsub("/ ", "/", go$goname) # remove space between terms separated by "/" in goname column
+go$goname = gsub(",", "/", go$goname) 
+
+goc = go %>% dplyr::group_by(gid) %>% dplyr::summarise(ctag = str_c(ctag, collapse = ","), goid = str_c(goid, collapse = ","), evidence = str_c(evidence, collapse = ","), gotype = str_c(gotype, collapse = ","), level = str_c(level, collapse = ","), goname= str_c(goname, collapse = ","))
+
+#filter goc for easier matching 
+gom = goc %>% select(1,3,6,7)
+  
+## for unique GO terms use goid and not goname.
+gou = unique(go$gid) #39324 original genes in GO term list
+goi = unique(go$goid) #9440 unique goid or gonames 
+
+# how many genes with goids are expressed in tissues sampled 
+# lets add a tissue column to these dfs and rbind. then can summarize by goid,goname and tissue. I will not need to use these "expressed"/tissue gene list for filter degs because degs are already expressed. Use gom instead.
+go_ctx = plyr::match_df(gom, tct_b, on = "gid") %>% add_column(Tissue = "coleoptile_tip") #18530 genes with goid expressed in ct, had to have 1:1 w>b mapping
+go_eix = plyr::match_df(gom, tei_b, on = "gid") %>% add_column(Tissue = "embryo_imbibed") #18041 genes with goid expressed in ei
+go_lfx = plyr::match_df(gom, tlf_b, on = "gid") %>% add_column(Tissue = "leaf") #17845 genes with goid expressed in lf
+go_tsx = plyr::match_df(gom, tts_b, on = "gid") %>% add_column(Tissue = "tassel_stem") #19142 genes with goid expressed in lf
+go_tax = plyr::match_df(gom, tta_b, on = "gid") %>% add_column(Tissue = "tassel") #20871 genes with goid expressed in lf
+
+#rbind and separate rows to summarize by goid/goname x Tissue. For each goid, how many are found in each set of expressed genes/tissue
+gox = rbind(go_ctx, go_eix, go_lfx, go_tsx, go_tax) 
+
+rdf = rde %>% select(Tissue, gid) %>% distinct()
+
+gox = left_join(gom,rdf) 
+gxn = gox %>% #summarize to have a table to merge #expressed genes for phyper calculation later 
+  dplyr::group_by(Tissue) %>%
+  dplyr::summarise(n = n_distinct(gid)) #could do summarise(n=n()) or n=n_distinct() because all gids x Tissue are unique
+gN = gxn %>% dplyr::rename("N" = "n")
+  
+gof = gox %>% separate_rows(goid, level, goname, sep = ",")
+
+# summarize. these would be the popn of GO terms for expressed genes/ tissue
+gon = 
+  gof %>% 
+  dplyr::group_by(goid, goname, level, Tissue) %>% # group_by goid to count each goid 
+  dplyr::summarise(n = n())
+
+# GOIDs: for each allele, what goids do we have x degs 
+go_de = dplyr::left_join(do, gom, by = "gid") #use gom- because db is already filtered for expressed 1:1 w>b 
+gd = go_de %>% filter(!is.na(goid)) # remove all rows (degs x contrast) that have no goid associated with the gene.
+
+gg = gd %>% separate_rows(goid, level, goname, sep = ",")
+ge = gg %>% distinct()
+
+gf = ge %>% dplyr::group_by(tf, Genotype, Treatment, Experiment, Tissue, direction, n , gid, w.gid, log2fc, padj) %>% dplyr::summarise(goid = str_c(goid, collapse = ","), level = str_c(level, collapse = ","), goname= str_c(goname, collapse = ","))
+
+# summarise how many degs have a goid for each contrast 
+gdn = gf %>% 
+  dplyr::group_by(tf, Genotype, Treatment, Experiment, Tissue, direction) %>%
+  dplyr::summarise(n_deg_goid = n())
+
+# combine summary with go terms and print results
+gfe = gf %>% select(-7) %>% left_join(gdn)
+
+# write_tsv(gfe, file.path(dirr, "rn21a-rn20h_deg_go_filter_mw.tsv")) # this is the final deg go term list for all W22 degs with a B73 gid that is expressed in the tissue sampled + has a goid.
+gfe = read_tsv(file.path(dirr, "rn21a-rn20h_deg_go_filter_mw.tsv"), col_types = list("c","c","c", "c","c","c", "c","c","c","c","c","c", "c","c","d"))
+
+#now get a summary count of how many times each goid shows up per contrast. will compare this with popn of GO terms in gon.
+gnf = ge %>% 
+  dplyr::group_by(tf,Genotype, Treatment, Experiment, Tissue, direction, goid, goname, level) %>%
+  dplyr::summarise(n = n())
+
+#CREATE FINAL TABLE FOR PHYPER ENRICHMENTER OF GO TERMS 
+gx = gnf %>% dplyr::rename("x" = "n") # x are the number of degs that have this goid x contrast
+gm = gon %>% dplyr::rename("m" = "n") # of times each goid shows up for expressed genes x tissue - popn of goids/exp genes/tissue
+gk = gdn %>% dplyr::rename("k" = "n_deg_goid") # degs x contrast that have a goid. this is the starting deg list - then break down by each goid term 
+
+gxk = left_join(gx, gk) #joining #degs with goid and # of expressed genes/tissue with goid dfs together
+gxkm = left_join(gxk, gm) # now join with gm, which is # expressed genes/goid/tissue - THE SPECIFIC GOID
+
+gxkmN = left_join(gxkm, gN) # now add column with N = #of genes in genome expressed WITH a goid x Tissue. summary table gN
+
+gph = gxkmN %>% mutate(phyper_pval = phyper(x-1, m, N-m, k, lower.tail = FALSE))
+
+gphf = gph %>% filter(phyper_pval < 0.05)
+
+write_tsv(gphf, file.path(dirr, "rn21a-rn20h_phyper_go_filter_mw.tsv"))
+gphf = read_tsv(file.path(dirr,"rn21a-rn20h_phyper_go_filter_mw.tsv"))
+
+#want to add in actual gids for these goids in this table 
+pn = left_join(gphf,ges)
+write_tsv(pn, file.path(dirr, "rn21a-rn20h_phyper_go_filter_mw_gid.tsv"))
+
+library(ggplot2)
+library(ggsci)
+library(ggrepel)
+library(ggforce)
+library(scales)
+library(viridis)
+library(lemon)
+
+#problem with selecting top 40 for enrichment is lose alleles - lets select top 50 and then add in those terms for other alleles?
+
+pn = read_tsv(file.path(dirr, "rn21a-rn20h_phyper_go_filter_mw.tsv"), col_names = TRUE)
+
+# pn$goname = gsub("\\/.([a-zA-Z])", "", pn$goname) 
+# pn$goname = gsub("\\s*\\([^\\)]+\\)", " ", pn$goname) 
+pn$Genotype = gsub('_', '-', pn$Genotype)
+
+#remove orphan249-m2 - potential for mutant to encode full ORF
+pm = pn %>% filter(Genotype %in% c("wrky8-m1", "hsf18-m1", "wrky87-m2", "wrky87-m1", "hsf20-m1", "baf6021-m1", "c3h42-m1", "hsf13-m1m2","hsf29-m1", "myb40-m1", "sbp20-m3", "bzip76-m2", "hsf24-m3", "hsf29-m2" , "wrky2-m2", "wrky8-m2", "myb40-m2", "e2f19-m2", "hsf6-m2", "e2f13-m1", "sbp20-m2", "jmj13-m4", "baf6021-m2", "bzip76-m3", "hsf13-m1","hsf24-m4", "e2f19-m1", "mybr32-m1", "gras75-m1", "mybr21-m1", "wrky82-m1", "hsf6-m1", "gras52-m1"))
+
+db = pm %>% filter(direction == "down") %>%
+  slice_min(phyper_pval, n = 64) # took the top 40 - but realized some of the top 40 were redundant. so  actually going to select more
+ld = unique(db$goid)# got to 50
+ub = pm %>% filter(direction == "up") %>%
+  slice_min(phyper_pval, n = 50) # took the top 50
+le = unique(ub$goid) # at 50 
+
+down = pm %>% filter(direction == "down")
+dc = db %>% select(goid)
+dd = left_join(dc, down)
+de = unique(dd$goid)
+
+up = pm %>% filter(direction == "up")
+uc = ub %>% select(goid)
+ud = left_join(uc, up)
+ue = unique(ud$goid)
+
+du = full_join(dd,ud)
+
+# write_tsv(du, file.path(dirr,"go_phyper_n50_up-down.txt")) # now edit go name before making plots 
+du = read_tsv(file.path(dirr, "go_phyper_n50_up-down.txt"))
+dv = du %>% mutate(log10p = -log10(phyper_pval))
+dx = dv %>% mutate(log10p_bin = if_else(log10p > 5.25, 5.25, as.double(log10p)))
+dxx = dx %>% filter(direction == "down") 
+dxu = unique(dxx$Genotype)
+
+dxp = dx %>% filter(direction == "up") 
+dpu = unique(dxp$Genotype)
+
+# took all top 50 terms (highest p-values) and found all alleles with same term. df is already filtered for significant
+
+gd = dx %>% filter(direction == "down") %>%
+  ggplot(aes(x = Genotype, y = goname, color = log10p_bin, size = x)) + 
+  geom_point() +
+  scale_y_discrete(limits=rev) + #reverse order of y axis so go terms are alphabetical
+  scale_color_viridis_c(option= "magma", name = "-log10(p-value)", label=comma, begin = 0, end = 0.95) + # change the direction = -1 to reverse coloring scale 
+  labs(y=NULL, x="Genotype") +
+  theme_light(base_family = "Helvetica") + 
+  theme(
+    axis.text=element_text(size=9, color = "black")) +
+   theme(axis.text.x = element_text(angle=45, hjust = 1))
+ggsave(file.path(dirr, 'go_d3.pdf'), gd, width=9.75, height=7.5)
+
+gu = dx %>% filter(direction == "up") %>%
+  ggplot(aes(x = Genotype, y = goname, color = log10p_bin, size = x)) + 
+  geom_point() +
+  scale_y_discrete(limits=rev) + 
+  scale_color_viridis(option= "magma", name = "-log10(p-value)", label=comma, begin = 0, end = 0.95) + 
+  labs(y=NULL, x="Genotype") +
+  theme_light(base_family = "Helvetica") + 
+  theme(
+    axis.text=element_text(size=9, color = "black")) +
+   theme(axis.text.x = element_text(angle=45, hjust = 1)) 
+
+ggsave(file.path(dirr, 'go_u3.pdf'), gu, width=8.75, height=7.5)
+
+```
+### Enrichment for TF predicted targets ###
+
+# 2. Enrichment of TF DEGs as GCN predicted target genes 
+
+Code for final expressed TF-target list for TF alleles of interest from each network, n1 and n3
+N in final hypergeometric equation.
+For GCN (n1 and n3) predicted target enrichment: N = number of expressed non-redundant predicted target genes in the genome, m = number of expressed predicted targets per TF, k = number of DEGs, x = number of DEGs that are predicted targets. The fold-enrichment of GCN predicted targets that were DE was calculated by [x / (k / N) × m]. 
+
+```{r}
+n1 = read_tsv(file.path(dird1, "rf_100k_n1.tsv"), col_names = TRUE) # GCN TF-target predictions in at least 1 network
+n3 = read_tsv(file.path(dird1, "rf_100k_n3.tsv"), col_names = TRUE) # GCN TF-target predictions in at least 3 networks
+# filter out all targets without gene name starting with Zm, do not want sRNA, chloroplast and mitochondria genes as targets- ZemaCt###", "ZemaMp###"
+library(stringr)
+n1 = n1 %>% filter(str_detect(target, "Zm")) # GCN TF-target prediction in at least 1 network
+n3 = n3 %>% filter(str_detect(target, "Zm")) # GCN TF-target prediction in at least 3 network
+
+# need to determine how many unique gids were considered as GCN targets in each GCN/tissue. This will be N in our equation
+# tbx = 1:1 B73.4:W22 gid expressed list across all 5 tissues
+
+tez = tbx %>% dplyr::rename("target" = "gid") 
+n1a = left_join(n1,tez) 
+n1b = n1a %>% filter(!is.na(Tissue)) # remove all rows where targets are not considered expressed in any tissue 
+n1c = n1b %>% select(2,6) %>% distinct() #selected target and tissue columns, grouped by Tissue, filtered for unique rows, which = unique target gids and then summarised
+n1_ux = n1c %>% group_by(Tissue) %>% dplyr::summarise(n = n())  
+n1N = n1_ux %>% dplyr::rename("N" = "n") %>% add_column(enrichment = "n1")
+  
+# same thing for n3
+n3a = left_join(n3,tez) 
+n3b = n3a %>% filter(!is.na(Tissue)) 
+n3c = n3b %>% select(2,6) %>% distinct() #selected target and tissue columns, grouped by Tissue, filtered for unique rows, which = unique target gids and then summarised
+n3_ux = n3c %>% group_by(Tissue) %>% dplyr::summarise(n = n())  
+n3N = n3_ux %>% dplyr::rename("N" = "n") %>% add_column(enrichment = "n3")
+
+grnN = rbind(n1N, n3N) # same number of grn targets expressed in n1 and n3! 
+
+# Also determined N for number of grn targets expressed in genome /network 
+n1g = n1 %>% add_column(grn = "n1")
+n3g = n3 %>% add_column(grn = "n3")
+ra = bind_rows(n1g,n3g)
+rb = ra %>% select(c(-3,-5))
+rc = rb %>% separate_rows(network, sep = ",")
+rc = rc %>% dplyr::rename("gid" = "target") 
+rc = rc %>% select(-1) %>% distinct() # need to filter out regulator or summary count will count each target gene multiple times! 
+ea = rde %>% select(1,5,9) %>% distinct()
+rd = left_join(rc,ea)
+re = rd %>% filter(!is.na(Tissue)) # remove all rows where targets are not considered expressed in any tissue #every row is distinct by network 
+rf = re %>% group_by(grn, network, Tissue) %>% dplyr::summarise(N = n()) 
+write_tsv(rf, file.path(dirr, "rn21a-rn20h_n1-n3_grn_N_by_network.tsv")) 
+
+#for the GCN targets in each network, n >1 and n>3, will need to identify how many total targets per TF, then subset for targets that are expressed in each tissue. Maybe subset GRN list by regulator first, then can subset by expressed 1:1, and summarize based on contrast.
+ta = read_tsv(file.path(dird, "rn21a-rn20h.tf.gid.tsv"), col_names = TRUE) # TF gid's of interest
+td = ta %>% select(-3) %>% dplyr::rename("regulator" = "b.gid") 
+
+n1_f = plyr::match_df(n1, td, on = "regulator") %>% left_join(td) 
+n3_f = plyr::match_df(n3, td, on = "regulator") %>% left_join(td) 
+
+# summary table for predicted grn targets, n>1 and n>3, NOT filtered for expressed, 1:1
+n1_on = n1_f %>% # new summary count
+  dplyr::group_by(tf, regulator) %>% 
+  dplyr::summarise(n = n())
+n3_on = n3_f %>% # new summary count
+  dplyr::group_by(tf, regulator) %>% 
+  dplyr::summarise(n = n())
+
+# filter each network of predictions for expressed targets x tissue, 1:1 b>w gid -THIS WILL BE AFTER FILTERING MW
+# add tissue to n1_f and n3_f
+ea = read_tsv(file.path(dirr, "rn21a_exp_filter_mw.tsv")) # this is the expressed gene list from all tissues with genes filtered out from original DE
+ds = ea %>% select(1,3,4,5) %>% distinct() # do not need genotype information. 
+dt = ds %>% filter(!is.na(Treatment)) %>% distinct()
+
+n1_g = full_join(n1_f, dt) # this will add tissue data to GCN network data. then can filter for TF targets expressed/tissue. This is if some TFs that have RNA-seq data for multiple tissues and the expressed gene set will be different for each tissue can use full join here because filter by tissue and target next
+n3_g = full_join(n3_f, dt)
+
+# tbx = combined tissue 1:1 gid expressed list
+
+# Originally had multiple tissues/allele need to filter some TFs/tissue
+n1_fi = plyr::match_df(n1_g, tez, on = c("Tissue","target"))
+n3_fi = plyr::match_df(n3_g, tez, on = c("Tissue","target"))
+
+n1t = n1_fi %>% add_column(grn = "n1")
+n3t = n3_fi %>% add_column(grn = "n3")
+n4t = rbind(n1t, n3t) %>% dplyr::rename("n_network" = "n")
+n5t = left_join(n4t,tez) # get W22.gid for targets
+
+taa = ta %>% dplyr::rename("regulator" = "b.gid", "tf_w.gid" = "w.gid") # ta is df with TF gid's of interest
+n6t = left_join(n5t,taa)
+
+# summary table for predicted GCN targets, n>1 and n>3, expressed in tissues sampled and 1:1 B73.v4, W22 gid
+n1_fn = n1_fi %>% # new summary count
+  dplyr::group_by(tf, regulator, Treatment, Experiment, Tissue) %>% 
+  dplyr::summarise(n = n())
+n3_fn = n3_fi %>% # new summary count
+  dplyr::group_by(tf, regulator, Treatment, Experiment, Tissue) %>% 
+  dplyr::summarise(n = n())
+
+n1_ex = left_join(n1_fn,n1_fi)
+
+#rbind summary tables and print out 
+n1_s = n1_on %>% add_column(grn = "n1")
+n3_s = n3_on %>% add_column(grn = "n3")
+gs = rbind(n1_s, n3_s)
+
+n1_e = n1_fn %>% add_column(grn = "n1")
+n3_e = n3_fn %>% add_column(grn = "n3")
+ge = rbind(n1_e, n3_e)
+
+n6t = n6t %>% select(-exp)
+gle = left_join(n6t,ge)
+gle$network = gsub(",", "/", gle$network) # this will allow us to collapse all columns by a comma
+gle$score = gsub(",", "/", gle$score) 
+
+# removing TFs or alleles we do not trust are knockouts. Originally had sampled another bZIP76 allele in tassel stem, but only the two alleles in imbibed embryo tissue were true knockouts
+glf = gle %>% filter(!tf %in% c("mybr40", "gbp20", "myb36")) 
+glg = glf %>% filter(tf != "bzip76" | Tissue != "tassel_stem") #  I understood & operator to give TRUE only when both conditions are TRUE and | operator to give TRUE with only one condition to be TRUE or both, which is true for the which() function. When using filter() or subset() and specifying "not" e.g., "!=", then you would want to use "or" instead of "and." 
+glh = glg %>% ungroup() %>% select(-Treatment, -Experiment) %>% dplyr::rename("tf_gid" = "regulator", "target_gid" = "target", "target_w22.gid" = "w.gid", "tf_w22.gid"="tf_w.gid")
+gli = glh %>% group_by(tf, tf_gid,tf_w22.gid, Tissue, grn, n) %>% 
+  dplyr::summarise(target_gid = str_c(target_gid, collapse =","), target_w22.gid =str_c(target_w22.gid, collapse =","), n_network = str_c(n_network, collapse =","), network = str_c(network, collapse = ","))
+
+write_tsv(gli, file.path(dirr2, "Table_S5_grn_n1-n3_targets.tsv")) #suplemental table for GRN manuscript
+
+gf = ge %>% dplyr::rename("enrichment" = "grn", "m" = "n") 
+grnm = gf %>% ungroup() %>% select(-2)
+  
+write_tsv(gs, file.path(dirr, "rn21a-rn20h_grn_n1-n3_sum.tsv"))
+write_tsv(ge, file.path(dirr, "rn21a-rn20h_grn_n1-n3_exp_sum_filter_mw.tsv"))
+
+# now need to calculate how many targets x network were predicted for each tf by each tissue total: NOT filtered for expressed
+# summary table for predicted grn targets, n>1 and n>3, NOT filtered for expressed, 1:1
+n1u = n1_f %>% dplyr::rename("network_n" = "n") %>% select(-5) %>% separate_rows(network, sep = ",") %>% add_column(grn = "n1")
+n3u = n3_f %>% dplyr::rename("network_n" = "n") %>% select(-5) %>% separate_rows(network, sep = ",") %>% add_column(grn = "n3")
+nu = rbind(n1u, n3u)
+# new total sum of predicted targets/network so that I can determine how many genes were not expressed that were predicted from total sum 
+nun = nu %>% 
+  dplyr::group_by(tf, regulator, grn, network) %>% 
+  dplyr::summarise(n = n())
+write_tsv(nun, file.path(dirr, "rn21a-rn20h_grn_n1-n3_by-network_sum.tsv"))
+
+# also want to know how many targets were expressed predicted targets /tf / network
+# lets separate rows for n1_g and n3_g
+n1en = n1_g %>% dplyr::rename("network_n" = "n") %>% select(-5) %>% separate_rows(network, sep = ",")
+n1en = n1en %>% add_column(grn = "n1")
+
+n3en = n3_g %>% dplyr::rename("network_n" = "n") %>% select(-5) %>% separate_rows(network, sep = ",")
+n3en = n3en %>% add_column(grn = "n3")
+
+nan = rbind(n1en, n3en)
+
+# because we have multiple tissues/allele need to filter some tfs/tissue
+nbn = plyr::match_df(nan, tz, on = c("Tissue","target")) 
+
+# now need to calculate how many targets x network were predicted for each tf by each tissue 
+ncn = nbn %>% 
+  dplyr::group_by(tf, regulator, Treatment, Experiment, Tissue, grn, network) %>% 
+  dplyr::summarise(n = n())
+write_tsv(ncn, file.path(dirr, "rn21a-rn20h_grn_n1-n3_exp-by-network_sum_filter_mw.tsv"))
+
+# now create a final table with how many were predicted total for each tf from the network and how many were expressed. Then combine this table with actual log2fc values. 
+ncn = ncn %>% dplyr::rename("n_predicted_exp" = "n") # remember that this total reflects expressed by counts of merged replicate cpm cutoff + DEGs that were filtered/tissue based on mutant_W22 data 
+nun = nun %>% dplyr::rename("n_predicted" = "n")
+net = full_join(nun, ncn)
+
+```
+### Enrichment for TF predicted targets ###
+# 2. Enrichment of TF DEGs as GCN predicted target genes continued ... 
+
+Code for hypergeometric enrichment of how many DEG's were GCN predicted targets/TF from each network, n1 and n3. Use N (number of expressed total predicted targets/tissue - not just predicted targets from TF's of interest) calculated from above.
+For GCN (n1 and n3) predicted target enrichment: N = number of expressed non-redundant predicted target genes in the genome, m = number of expressed predicted targets per TF, k = number of DEGs, x = number of DEGs that are predicted targets. The fold-enrichment of GCN predicted targets that were DE was calculated by [x / (k / N) × m]. 
+
+```{r}
+# match do df with n1 and n3 on regulator and target
+# start by adding in regulator b.gid to do- already did this with df td
+dn = read_tsv(file.path(dirr, "rn21a-rn20h_deg_B73_filter_mw.tsv"), col_names = TRUE) # filtered ei, leaf, ts deg list from mutant_W22 contrasts
+do = dn %>% separate_rows(gid, w.gid, log2fc, padj, sep = ",") # n column is number of degs/allele/direction with 1:1 b>w gid
+ta = read_tsv(file.path(dird, "rn21a-rn20h.tf.gid.tsv"), col_names = TRUE) # changed b.gid column to regulator for these TF gids to match with n1 and n3 df that have regulator and target 
+td = ta %>% select(-3) %>% dplyr::rename("regulator" = "b.gid") 
+dq = left_join(do, td)
+# some tfs do not have any grn predictions
+ea = dq %>% dplyr::rename("target" = "gid")
+eb = plyr::match_df(ea, n1, on = c("regulator", "target")) # can match df with original n1 because deg df is already filtered for expressed genes
+
+# now summarize results and add grn category
+ec = eb %>% add_column(grn = "n1")
+ed = ec %>% 
+  dplyr::group_by(tf, regulator, Genotype, Treatment, Experiment, grn, Tissue, direction) %>% 
+  dplyr::summarise(n = n())
+
+# now replace original n column in deg table with new count
+ee = ec %>% select(-7) %>% left_join(ed)
+# now left join with original n1 df to get networks for all contrasts 
+n1 = n1 %>% dplyr::rename("network_n" = "n")
+ef = left_join(ee, n1)
+
+# now same for n3, then combine summary and results
+fb = plyr::match_df(ea, n3, on = c("regulator", "target")) # can match df with original n1 because deg df is already filtered for expressed genes
+
+# now summarize results and add grn category
+fc = fb %>% add_column(grn = "n3")
+fd = fc %>% 
+  dplyr::group_by(tf, regulator, Genotype, Treatment, Experiment, grn, Tissue, direction) %>% 
+  dplyr::summarise(n = n())
+
+# now replace original n column in deg table with new count
+fe = fc %>% select(-7) %>% left_join(fd)
+# now left join with original n3 df to get networks for all contrasts 
+n3 = n3 %>% dplyr::rename("network_n" = "n")
+ff = left_join(fe, n3)
+
+# joining final tables for final print out 
+jb = rbind(ef,ff)
+jc = jb %>% select(1,11,2:6,12:13,7:10,14:16)
+jc$network_n = as.character(jc$network_n)
+jc$network = gsub(",", "/", jc$network) # this will allow us to collapse all columns by a comma
+jc$score = gsub(",", "/", jc$score) 
+
+jd = jc %>% group_by(tf, regulator, Genotype, Treatment, Experiment, Tissue, direction, grn, n) %>% dplyr::summarise(target_wgid = str_c(w.gid, collapse = ","), target_bgid = str_c(target, collapse = ","), log2fc= str_c(log2fc, collapse = ","), padj= str_c(padj, collapse = ","), network_n= str_c(network_n, collapse = ","), network= str_c(network, collapse = ","), score= str_c(score, collapse = ","))
+
+write_tsv(jd, file.path(dirr, "rn21a-rn20h_grn_n1-n3_deg_filter_mw_2.tsv"))
+
+# joining summary tables and renaming columns for phyper calculation
+#dde = dk %>% select(-7)
+eg = full_join(ed, dk) # need to join grn summary with all rows of dde (deg list without k column because will be missing some rows if there were no matches to grn targets)
+eh = eg %>% ungroup() %>% select(-6) %>% add_column(grn = "n1")
+ei = eh %>% dplyr::rename("x" = "n")  # of degs that are grn targets 
+ej = ei %>% mutate(x = case_when(is.na(x) ~ "0", TRUE ~ as.character(x)))
+ej$x = as.integer(ej$x) 
+
+fg = full_join(fd, dk) # need to join grn summary with all rows of dde (deg list without k column because will be missing some rows if there were no matches to grn targets)
+fh = fg %>% ungroup() %>% select(-6) %>% add_column(grn = "n3")
+fi = fh %>% dplyr::rename("x" = "n")  # of degs that are grn targets 
+fj = fi %>% mutate(x = case_when(is.na(x) ~ "0", TRUE ~ as.character(x)))
+fj$x = as.integer(fj$x) 
+
+grnx1 = rbind(ej, fj) 
+grnxk = grnx1 %>% dplyr::rename("enrichment" = "grn") %>% select(-2)
+
+#CREATE FINAL GCN PHYPER CALCULATION DF: N, m, k, x
+grnN = rbind(n1N, n3N) 
+grnm = ge %>% dplyr::rename("enrichment" = "grn", "m" = "n") 
+dk = dp %>% dplyr::rename("k" = "n") 
+grnx = ja %>% dplyr::rename("enrichment" = "grn", "x" = "n")
+
+ge = read_tsv(file.path(dirr, "rn21a-rn20h_grn_n1-n3_exp_sum_filter_mw.tsv"), col_names = TRUE)
+gf = ge %>% dplyr::rename("enrichment" = "grn", "m" = "n") 
+grnm = gf %>% ungroup() %>% select(-2)
+
+# nxk = left_join(grnx, dk) #joining #degs and # of expressed grn targets/tissue dfs together
+nxkm = left_join(grnxk, grnm) # now join with grnm, which is # expressed predicted targets/tissue
+
+nxkmN = left_join(nxkm, grnN) # now add column with N = #of GCN target genes in genome expressed x Tissue. #grnN is in above section
+nxkmN = nxkmN %>% select(1:6,9,7:8,10:11)
+
+nph = nxkmN %>% mutate(phyper_pval = phyper(x-1, m, N-m, k, lower.tail = FALSE))
+
+write_tsv(nph, file.path(dirr, "rn21a-rn20h_phyper_grn_n1-n3_filter_mw.tsv")) # do not want to filter this for only significant phyper values- want to print all to see which alleles are enriched for a specific category 
+
+```
+### Enrichment for TF predicted targets ###
+# 3. GCN predicted targets fold change enrichment 
+
+Calculate a fold change enrichment calculation for n1 and n3 targets separately, calculate (obs # DE /expected #DE)
+The fold-enrichment of GCN predicted targets that were DE was calculated by [x / (k / N) × m]. 
+
+```{r}
+nph = read_tsv(file.path(dirr, "rn21a-rn20h_phyper_grn_n1-n3_filter_mw.tsv"), col_names = TRUE)
+ee = nph %>% mutate(ode_ede = x/((k/N)*m))
+ef = ee %>% filter(phyper_pval < 0.05)
+
+library(ggplot2)
+library(dplyr)       # consistent data.frame operations
+library(purrr)       # consistent & safe list/vector munging
+library(tidyr)       # consistent data.frame cleaning
+library(lubridate)   # date manipulation
+library(scales)      # pairs nicely with ggplot2 for plot label formatting
+library(ggthemes)    # has a clean theme for ggplot2
+library(ggsci)
+library(viridis)     
+library(knitr) 
+library(lemon)
+
+# want a divergent bar plot with n1 and n3 as stat=identity
+# only way to plot divergent bar plot is to mutate one set of values to negative 
+
+ib = ee %>% #filter from ee because we want all alleles with a significant n1 
+  mutate(nm = ifelse(direction == "up", ode_ede, -1*ode_ede))
+
+ib$Genotype = gsub('_', '-', ib$Genotype)
+ic = ib %>%filter(Genotype %in% c("bzip76-m2","bzip76-m3","c3h42-m1","e2f13-m1","e2f19-m1","e2f19-m2","gras52-m1","gras75-m1","hsf13-m1","hsf18-m1","hsf20-m1","hsf24-m3","hsf24-m4","hsf29-m1","hsf29-m2","hsf6-m1","hsf6-m2","myb40-m1","myb40-m2","mybr21-m1","mybr32-m1","sbp20-m2","sbp20-m3","wrky2-m2","wrky8-m1","wrky8-m2","wrky82-m1","wrky87-m1","wrky87-m2"))
+
+dor = c("up", "down")
+ic$direction = factor(ic$direction, levels = dor)
+
+break_values = pretty(ib$nm)  # use pretty() to get a range of values 
+
+gg = ic %>%
+  ggplot(aes(x = Genotype, y = nm, fill = direction))+
+  geom_hline(yintercept = 0)+
+  geom_bar(stat = "identity", width = 0.8, color = "black", size = 0.2) + 
+  scale_y_continuous(name = "fold enrichment of DE genes", breaks = scales::pretty_breaks(15), limits = c(-4, 10))+
+  geom_text(aes(label = ifelse(phyper_pval < 0.05, "*", ""), vjust = ifelse(nm >= 0, -0.25, 1.5)), color = "black", size =7) +
+  scale_fill_manual(values = c("#fe214f","#2b4ff2")) + 
+  theme_classic(base_family = "Helvetica") + 
+  theme(
+    axis.text=element_text(size=11, color = "black"),
+    legend.text = element_text(size=11, color = "black"), legend.title = element_text(size = 12), 
+    axis.title = element_text(size = 12),
+    panel.background = element_rect(colour = "black", size=0.5, fill=NA),
+   axis.text.x = element_text(angle=45, hjust = 1))+
+  facet_rep_wrap(~enrichment, scales = "free_y", ncol=1)
+
+ggsave(file.path(dirr2, "06_n1n3_fc.pdf"), gg, width = 8.5, height = 8) #Figure 7 and Figure S7
+
+```
+### Identifying TF binding sites in Y1H promoter cloned regions of MYB40 and HSF24 ###
+No code. Description of reference input file for the 54 promoter B73.v4 coordinates cloned in the Y1H screen
+
+Transcription factor binding sites (TFBSs) were identified in Y1H bait cloned promoter sequences of predicted targets (Yang et al. 2017) for two TFs, MYB40 and HSF24. The B73v4 maize genome was scanned for TFBS sequence of five R2R3 MYB TFs (AtMYB52, AtMYB59, AtMYB46, AtMYB111, AtMYB55) (Franco-Zorrilla et al. 2014) and a generic HSF TFBS (5' NGAANNTTCN 3') (Perisic et al. 1989), with N nucleotide weighting set to the GC content of maize genomic DNA to find significant matches (p < 0.01) (FIMO tool in the MEME suite (Grant et al. 2011)). These putative genome-wide TFBSs were then subset to Y1H bait promoter cloned regions for predicted targets of MYB40 or HSF24 to identify if these promoter sequences contained the respective TFBSs (BEDTools intersect (Quinlan and Hall 2010)). 
+
+Input file y1h_54_pro.bed has the B73.v4 reference coordinates for the cloned sequences of all 54 promoters in the Y1H screen (Yang et al. 2017).
+
+1. took +/- 2kb from 54 phenolic genes cloned in Y1H and scanned for known MYB40 and HSF24 TFBS
+2. took only cloned regions of promoters (~1kb upstream, got actual coordinates of cloned sequence in B73v4 by using promoter sequences from v3/ gid from Yang et al. 2016)
+
+1. The number of identified putative MYB and HSF TFBSs in the cloned region of each Y1H bait
+2. The number of identified putative MYB TBFSs within +/- 2kb of the TSS
+
+In the paper, we report results only on the motifs found within the cloned region of the MYB40 and HSF24 cloned bait.
+
+### Morphological field measurements ###
+
+For plant height and ear height (measured in cm), a t-test (unpaired, FDR adjusted p-value < 0.05) was performed on log transformed values between each mutant row and the combined W22 rows within a field to determine if the difference between means was significant (File S2).
+
+2019 Field Phenotyping Data: plant height, ear height and flowering time data for 12/33 mutants + W22 control from the 2019 field season. t-test between each mutant and W22 
+
+Flowering time - Cannot complete statistics, one data point/row. All flowered within X days from control and neighboring rows. 
+Statistics on rows for difference in plant terminal height (cm) and ear height (cm) in X cm.
+
+log transform data without normal distribution
+Even though the distribution is not perfectly normal it looks much closer to the normal distribution than the previous histogram!
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+library(tidyr)
+library(rstatix)
+library(ggpubr)
+
+pa = read_tsv(file.path(dird, "2019_TF_PHT_EHT_02.txt"))
+pb = pa %>% group_by(Field, Range, Row, Genotype, Trait_cm) %>% pivot_longer(cols = c(6:15), names_to = "plant", values_to = "cm")
+pc = pb %>% filter(!is.na(cm))
+#check the distribution - is it normal? pretty normal, but maybe a bit left skewed
+# Plant Height histogram - a bit left_skewed
+pc %>% filter(Trait_cm == "PHT") %>%
+  ggplot() +
+    geom_histogram(aes(x = cm),
+                   alpha = 0.9,
+                   fill = '#18a1db') 
+# Ear Height histogram - right skewed
+pc %>% filter(Trait_cm == "EHT") %>%
+  ggplot() +
+    geom_histogram(aes(x = cm),
+                   alpha = 0.9,
+                   fill = '#18a1db') 
+
+# Log transformation
+pd = pc %>% mutate(log_cm = log(cm))
+#PHT and EHT look more normal
+pd %>% filter(Trait_cm == "PHT") %>%
+  ggplot() +
+    geom_histogram(aes(x = log_cm),
+                   alpha = 0.9,
+                   fill = '#18a1db') 
+
+# Consider all PHT and EHT data points for each mutant allele across both fields. Leave field out of hte equation and see if the Trait is significant.
+ta = pd %>%
+  group_by(Trait_cm) %>%
+  t_test(log_cm ~ Genotype, ref.group = "W22") %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")
+write_tsv(ta, file.path(dirr, "2019_PHT-EHT_across-field_sig.tsv"))
+
+# Is there a significance between neighboring rows? No significant difference in PHT or EHT between neighboring rows within range, which would suggest an environmental/field effect and not due to the TF mutation.
+tb = pd %>%
+  group_by(Field, Trait_cm) %>%
+  t_test(log_cm ~ Genotype) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj") 
+tt = tb %>% select(-n1,-n2) %>% pivot_wider(id_cols = c(Trait_cm, group1, group2),  names_from = Field, values_from = c(statistic, df, p,p.adj, p.adj.signif))
+write_tsv(tt, file.path(dirr, "2019_PHT-EHT_row_sig.tsv"))
+
+# Are PHT and EHT significant for W22 control between the two fields? 
+pe = pd %>% filter(Genotype == "W22")
+tc = pe %>%
+  group_by(Trait_cm) %>%
+  t_test(log_cm ~ Field) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj") 
+
+# Look at significance within each field between each mutant/trait/field x W22/trait/field and consider a true significance if the trait is significant between the mutant allele and W22 in both fields. 
+tb2 = pd %>%
+  group_by(Field, Trait_cm) %>%
+  t_test(log_cm ~ Genotype, ref.group = "W22") %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj") 
+tb3 = tb2 %>% select(-n1,-n2) %>% pivot_wider(id_cols = c(Trait_cm, group1, group2),  names_from = Field, values_from = c(statistic, df, p,p.adj, p.adj.signif))
+write_tsv(tb3, file.path(dirr, "2019_PHT-EHT_Field_sig.tsv"))
+
+```
+### Morphological field measurements continued... ###
+No alleles with significance compared to W22 for PHT or EHT within each field, across both fields. 
+
+Due to variance between fields comparing significance within fields and not an average across Fields/Genotype/Trait
+See for PHT that W22 is significantly different between fields. No statistics including data from both fields, only within each field.
+
+tc
+# A tibble: 2 × 11
+  Trait_cm .y.    group1 group2    n1    n2 statistic    df           p      p.adj p.adj.signif
+  <chr>    <chr>  <chr>  <chr>  <int> <int>     <dbl> <dbl>       <dbl>      <dbl> <chr>       
+1 EHT      log_cm X-6    X-7      108   109    0.0353  208. 0.972       0.972      ns          
+2 PHT      log_cm X-6    X-7      108   109    5.07    215. 0.000000869 0.00000174 ****      
+
+What to do if W22 PHT between fields is highly significant? 
+#Look at a PCA across fields
+
+```{r}
+library(PCAtools)
+library(ggplot2)
+library(ggsci)
+library(ggrepel)
+library(ggforce)
+#create a matrix of values
+m1 = pd %>% unite("Sample", Field, Row, Genotype, sep = "_", remove = FALSE)
+m2 = m1 %>% group_by(Sample, Trait_cm) %>% mutate(mean_log_cm = mean(log_cm)) 
+m3 = m2 %>% select(Sample, Trait_cm, mean_log_cm) %>% distinct() %>%  pivot_wider(names_from = "Sample", values_from = "mean_log_cm") %>% remove_rownames %>% column_to_rownames(var="Trait_cm") # mean of log_cm is only 2 values/allele/trait
+
+# now create meta data file for PCAtools plot function for each tissue
+m4 = ungroup(m1) %>% select(Sample, Field, Row, Genotype) %>% distinct() %>% column_to_rownames(var="Sample")
+
+# check that sample names match exactly between data and meta data
+all(colnames(m3) == rownames(m4))
+
+# Conduct principal component analysis (PCA):
+p = pca(m3, metadata = m4) 
+biplot(p, colby = "Field", gridlines.major = FALSE, gridlines.minor = FALSE)
+p_var = p$variance  # lists the PC variance
+
+# create dataframe to plot pca 
+mp = p$rotated %>% as.data.frame %>%
+  rownames_to_column("SampleID")
+mq = m4 %>% rownames_to_column("SampleID") %>% left_join(mp)
+
+p1 = ggplot(mq, aes(x=PC1,y=PC2, color=Genotype)) + 
+   geom_point(size = 3) +
+      theme_classic() + 
+      scale_color_igv() +
+     theme(legend.pos=c(0.02,0.02), legend.justification = c(0.02,0.02), legend.title = element_blank(), legend.text = element_text(size = 10)) +
+      labs(x=paste0("PC1 (",round(p_var[1],1),"%)"),
+       y=paste0("PC2 (",round(p_var[2],1),"%)")) +
+      theme(axis.ticks = element_blank(), # removing axis.ticks and axis text
+            axis.text = element_blank()) + 
+      theme(panel.border = element_rect(colour = "black", fill=NA, size = 1)) # adding a border around plot
+ggsave(file.path(dirr, 'PHT_EHT_Genotype_PCA.pdf'), p1, width=8, height=8)
+
+```
+### Phenolic profiling with targeted LC-MS- Meatbolite data analysis ###
+
+To determine if the mutant metabolite profile was significantly different from that of W22, an unpaired t-test (FDR adjusted p-value < 0.05) was performed on log2 transformed AUA values of 28 phenolic compounds between each mutant allele and control group: W22 r-g or UniformMu W22, and between control groups (File S3). The 4 phenolic compounds (Vitexin, Dihydroquercetin, Isoorientin, Kaempferol) that were significantly different between the control groups, W22 r-g colorless and UniformMu color-converted W22, were removed from the analysis to avoid false positives. In total, we could analyze data for 24 phenolic compounds. We only considered a mutant metabolite profile per compound to be significantly different from the control if there was statistical significance compared to both W22 controls: W22 r-g and UniformMu W22. 
+
+Read in AUA + LOD Metabolite Data 
+1. Across sub-batches are there 25% of samples < the LOD/Compound/sub-batch. e.g. If there are 2 sub-batches. 20 samples in batch 1/Compound 1. 5/20 are below LOD for batch 1. 20 samples in batch 2/Compound 1 and 5/20 are also below the LOD for batch 2. Total = 10/40. <25% of samples across sub-batches 1 and 2 for Compound 1 that are below the respective LOD's per sub-batch. Therefore, we do not remove this sample from the analysis. 
+- pay attention to compounds for sure need to remove:Apigenidin, Apigenin-7-O-glu because there is no data for control W22 and W22_rg
+2. Remove samples if Metabolite missingness > 10% across sub-batches. In batch 1 No data for Quercetin, Apigenidin, Phenylalanine 
+2. log2 transform AUA values before calculating mean of any technical replicates/batch and then calculate the mean of biological replicates. log2(AUA + 1)
+3. Impute / Convert NA values to 0
+4. T-test. padj = fdr
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+library(tidyr)
+
+aa = read_tsv(file.path(dird, "221011_LCMS_AUA_TF-mutant.txt"), col_names = TRUE) #changed column headers to include '.' and '_' instead of '-'
+#remove compounds that cannot be analyzed due to 25% of samples in either Run 1 or Run2 with an AUA < LOD/compound (measured/run)
+ab = aa %>% select(-Apigenidin, -Quercetin, -Shikimic_acid) # remove compounds for >25% samples across the 2 sub-batches < LOD/Compound/sub-batch. Or. > 10% missing values for samples across sub-batches. 
+# remove compounds for >20% samples across the 2 sub-batches < LOD/Compound/sub-batch. Or, > 10% missing values for samples across sub-batches. 
+ac = ab %>% pivot_longer(cols = c(5:32), names_to = "Compound", values_to = "AUA")
+#now read in LOD values/compound/run and merge dfs
+la = read_tsv(file.path(dird, "221011_LCMS_LOD.txt"), col_names = TRUE)
+lb = la %>% filter(!Compound %in% c("Apigenidin", "Quercetin", "Shikimic_acid"))
+ad = left_join(ac, lb)
+
+# ae = ad %>% mutate(AUA = if_else(AUA < LOD, NA, AUA))
+# af = ae %>% filter(!is.na(AUA)) # remove na values for AUA due to lower values than LOD
+ag = ad %>% pivot_wider(id_cols = c(Genotype, bio_rep, LCMS_run, Compound, LOD), names_from = tech_rep, names_prefix = "AUA_", values_from = AUA) #names_prefix adds on string prefix, useful when tech_rep was a numeric vector
+ah = ag %>% rowwise() %>% mutate(AUA_avg = sum(across(starts_with("AUA"))/2, na.rm = F)) #na.rm = T retains values where there is an NA for one column value, needed na.rm = F because would divide AUA_1 by 2
+ai = ah %>% mutate(AUA = if_else(!is.na(AUA_avg), AUA_avg, AUA_1))
+aj = ai %>% mutate(AUA = if_else(is.na(AUA), AUA_2, AUA))
+aj2 = aj %>% select(-6,-7,-8) # now averaged across technical reps and can now take the mean and report number of reps/Genotype/Compound used to calculate mean
+ak = aj2 %>% group_by(Genotype, Compound) %>% mutate(mean_AUA = mean(AUA), n_rep = n(), sd_AUA = sd(AUA))
+# ak1 = ak %>% filter(n_rep == 1)
+
+# write_tsv(ak, file.path(dirr, "mean-sd_AUA.tsv")) # standard deviation is quite large for some of these values
+
+al = ak %>% select(-bio_rep, -LCMS_run, -LOD, -AUA) %>% distinct()
+#how many Genotypes have all compounds for future statistics
+a_sum = ungroup(al) %>% group_by(Genotype) %>% 
+  dplyr::summarise(n = n())
+# 29 total compounds
+
+# Look at the sample distributions to determine if the log2 transformation makes the distribution of data more normal. 
+
+library(rstatix)
+library(ggpubr)
+
+t0 = ak %>% mutate(log2_AUA = log2(AUA + 1)) 
+write_tsv(t0, file.path(dirr, "AUA_raw_mean-sd-log2-transform.tsv")) 
+
+#check the distribution post log2 transformation- is it normal? pretty normal, but maybe a bit left skewed
+# pht_hist = 
+t0 %>% 
+  ggplot() +
+    geom_histogram(aes(x = log2_AUA),
+                   alpha = 0.9,
+                   fill = '#18a1db') 
+
+t0 %>% 
+  ggplot() +
+    geom_histogram(aes(x = AUA),
+                   alpha = 0.9,
+                   fill = '#18a1db') #log2 transformation is more normally distributed!
+
+# T_TEST - unpaired, as two groups: control and WT W22 are independent
+t1 = t0 %>%
+  group_by(Compound) %>%
+  t_test(log2_AUA ~ Genotype, ref.group = "W22_rg") %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")
+t2 = t0 %>%
+  group_by(Compound) %>%
+  t_test(log2_AUA ~ Genotype, ref.group = "W22_ufmu") %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")
+t2b = t2 %>% filter(group2 != "W22_rg") # remove rows where "W22_rg" is in group 2 to avoid duplicates when combining dfs
+t3 = bind_rows(t1,t2b)
+write_tsv(t3, file.path(dirr, "log2-AUA_t-test_sig_long-format.tsv"))
+
+t4 = t3 %>% pivot_wider(id_cols = c(Compound, group2, n1, n2),  names_from = group1, values_from = c(statistic, df, p,p.adj, p.adj.signif))
+write_tsv(t4, file.path(dirr, "log2-AUA_t-test_sig.tsv"))
+
+## Create a heatmap of log2fc values for metabolites for each mutant - 24 compounds 
+
+library(ggplot2)
+library(ggsci)
+library(ggthemes) 
+library(ggrepel)
+library(ggforce)
+library(lemon)
+library(viridis)  
+library(colorspace)
+library(scales)
+library(RColorBrewer)
+
+t0 = read_tsv(file.path(dirr, "AUA_raw_mean-sd-log2-transform.tsv")) 
+
+# calculate log2fc of mutant/WT for metabolites
+za = t0 %>% select(-bio_rep, -LCMS_run, -LOD, -AUA, -log2_AUA) %>% filter(Genotype %in% c("W22_ufmu", "W22_rg")) %>% distinct()
+zb = za %>% pivot_wider(id_cols = Compound, names_from = Genotype, values_from = c(mean_AUA, sd_AUA))
+
+xa = t0 %>% filter(!Genotype %in% c("W22_ufmu", "W22_rg"))
+xb = xa %>% select(-LOD, -AUA, -log2_AUA, -bio_rep, - LCMS_run) %>% distinct()
+xc = left_join(xb, zb)
+xd = xc %>% mutate(log2fc_W22rg = log2(mean_AUA/mean_AUA_W22_rg), log2fc_W22ufmu = log2(mean_AUA/mean_AUA_W22_ufmu)) #same as log2(A) - log2(B)
+xe = xd %>% select(1,2,10,11)
+xf = xe %>% pivot_longer(cols = c(3:4), names_to = "control", values_to = "log2fc")
+xg = xf %>% mutate(control = gsub('.*_','',control))
+xh = xg %>% unite("Genotype_control", c(Genotype, control), sep = "_")
+# remove compounds that were significant between W22ufmu and W22rg
+xi = xh %>% filter(!Compound %in% c("Dihydroquercetin", "Isoorientin", "Kaempferol", "Vitexin"))
+
+my_breaks = c(-2, -1, 0, 1, 2)
+my_labels = c(-2, -1, 0, 1, 2)
+xi1 = xi %>% mutate(log2fc_bin = if_else(log2fc >= 2, 2, as.double(log2fc)), log2fc_bin = if_else(log2fc <= -2, -2, as.double(log2fc_bin)))
+xi2 = xi1 %>% separate(Genotype_control, into = c("Genotype", "control"), sep = "_")
+xi3 = xi2 %>% mutate(control = gsub('W22','',control))
+#write_tsv(xi3, file.path(dirr, "AUA-log2fc-bin.tsv")) #added a pdi column to order genotypes by y1h predicted or not
+
+xi3 = read_tsv(file.path(dirr, "AUA-log2fc-bin.tsv")) 
+
+# Order Genotypes by y1h or not- recoded y1h as "a"
+xi4 <- xi3 %>%
+  group_by(pdi) %>%
+  arrange(Genotype) %>%
+  mutate(Genotype = factor(Genotype, levels = unique(Genotype[order(Genotype)]))) %>%
+  ungroup()
+
+gg = ggplot(xi4, aes(x = control, y = Genotype, fill = log2fc_bin)) +
+  geom_tile(color="white", linewidth=0.1) + #size deprecated, use linewidth instead
+  scale_fill_distiller(palette = "BrBG", direction = 1, name = "log2fc", limits = c(-1,1)*max(abs(xi1$log2fc_bin)), breaks = my_breaks, labels = my_labels) + # adding values so that color gradient is darkest when log2fc is highest # use scale_fill_distiller with continuous values
+  scale_x_discrete(position = "top", expand = c(0,0)) +
+  scale_y_discrete(limits=rev)+ #reversed
+   coord_equal() + 
+  labs(y=NULL, x = NULL) +
+  facet_grid(~Compound) +
+  theme_tufte(base_family = "Helvetica") + 
+  theme(
+    panel.spacing = unit(0, "lines"), 
+    panel.border = element_rect(colour = "darkgray", fill=NA, linewidth=0.3),
+          strip.background = element_blank(),
+          strip.placement = "outside",
+    strip.text = element_text(angle=45),
+    axis.ticks=element_blank(),
+    axis.text=element_text(size=9, color = "black"),
+    axis.text.x.top = element_text(vjust = 0.5),
+    axis.text.x=element_text(angle=45))
+ggsave(file.path(dirr, 'AUA_heatmap_log2fc_reorder.pdf'), gg, width=12, height=8) #Figure 4
+
+```
