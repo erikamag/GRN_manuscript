@@ -1,4 +1,4 @@
-# GRN Manuscript Supplemental Tables and Data Files
+# GRN Manuscript Supplemental Tables, Data Files and Code
 
 **Table S1. 32 Maize TF mutant alleles isolated from the UniformMu population to test GRN predictions.** Mutant allele transcriptome data obtained, UniformMu Mu ID and Stock, Pos: Mu insertion position within the gene, Pedi: pedigree of the mutant stock sampled for RNA-seq (BC = backcross, S = self), and PDI: protein-DNA interaction prediction method. RNA-seq CPM and FPKM for TF mutant and wild-type W22, DE data averaged across biological replicates (N), log2fc: log2 fold change of mutant to control, lfcSE: log fold change standard error and FDR adjusted p-value. Data for TF genes that are that are DE in the mutant compared to the wild-type are highlighted. 
 
@@ -14,4 +14,4 @@
 
 **GEO Series:GSE280139** includes meta data for raw RNA-seq data deposited to **NCBI BioProject: PRJNA936808** and processed gene expression data. 
 
-**Code** directory contains an RMarkdown file with all the code used in the manuscript
+**Code** directory contains an R Markdown file with all the code used in the manuscript
