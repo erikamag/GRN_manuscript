@@ -13,3 +13,5 @@
 **File S5. Predicted targets from GCN and Y1H methods for all transcription factors in this study.** TF-target predictions are listed by prediction method: y1h; Y1H screen, n1; 1/45 GCNs, and/or n3; 3/45 GCNs. For TFs with Y1H predictions, total targets (n) represent all B73v4 target genes. For TFs with GCN predictions, total targets (n) represent a subset of the predicted B73v4 targets that have an annotated W22 gene model and are expressed (CPM ≥ 1 in at least one sample/tissue). 
 
 **GEO Series:GSE280139** includes meta data for raw RNA-seq data deposited to **NCBI BioProject: PRJNA936808** and processed gene expression data. 
+
+**Code** directory contains an RMarkdown file with all the code used in the manuscript
