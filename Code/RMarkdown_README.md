@@ -1,4 +1,4 @@
-grn-ms-code R Markdown file including code for: 
+grn-ms-code.Rmd RMarkdown file including code for: 
 
 **Identification of DE genes for RNA-seq datasets/Tissue**
 1. Raw read count normlization: edgeR TMM method for calculating CPM and FPKM values.
