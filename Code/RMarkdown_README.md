@@ -1,4 +1,4 @@
-grn-ms-code.Rmd RMarkdown file including code for: 
+grn-ms-code.Rmd R Markdown file including code for: 
 
 **Identification of DE genes for RNA-seq datasets/Tissue**
 1. Raw read count normlization: edgeR TMM method for calculating CPM and FPKM values.
@@ -21,4 +21,4 @@ No code, just further description and input file included.
 
 **Phenolic profiling with targeted LC-MS- Meatbolite data analysis**
 
-/Code/R_Input directory contains some of the input files used in the RMarkdown Code
+/Code/R_Input directory contains some of the input files used in the R Markdown Code
