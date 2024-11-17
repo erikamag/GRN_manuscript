@@ -15,3 +15,5 @@
 **GEO Series:GSE280139** includes meta data for raw RNA-seq data deposited to **NCBI BioProject: PRJNA936808** and processed gene expression data. 
 
 **Code** directory contains an R Markdown file with all the code used in the manuscript
+
+A minted DOI was create for public release of this Github repository using Zenodo: https://doi.org/10.5281/zenodo.14176001.
